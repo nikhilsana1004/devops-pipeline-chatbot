@@ -88,8 +88,6 @@ git commit -m "Add AmazingFeature"
 git push origin feature/AmazingFeature
 Follow Python best practices and test locally.
 
-📝 License
-MIT License – see LICENSE
 
 📧 Contact
 Author: Nikhil Sana
