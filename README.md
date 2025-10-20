@@ -20,6 +20,7 @@ Storage: S3
 - AWS account with Athena, S3, and Bedrock access  
 - AWS CLI configured  
 - Basic CI/CD knowledge  
+- Read the prerequisites text file
 
 ## ⚙️ Quick Start
 
