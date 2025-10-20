@@ -1,0 +1,235 @@
+🏗 Architecture Overview
+This application is the frontend/query layer of a complete pipeline monitoring system:
+┌─────────────────┐
+│  CodePipeline   │
+│   Executions    │
+└────────┬────────┘
+         │ State Changes
+         ▼
+┌─────────────────┐
+│  EventBridge    │
+│     Rules       │
+└────────┬────────┘
+         │ Triggers
+         ▼
+┌─────────────────┐
+│Lambda Function  │ ← Captures events
+│  (Collector)    │   Transforms data
+└────────┬────────┘   Writes to S3
+         │
+         ▼
+┌─────────────────┐
+│   S3 Bucket     │ ← Partitioned by date
+│ Pipeline Events │   /year=2024/month=01/day=15/
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  AWS Glue/      │ ← Table definition
+│    Athena       │   Points to S3 data
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Streamlit App   │ ← This repository
+│  (This Code)    │   Queries via Athena
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  AWS Bedrock    │ ← AI interprets queries
+│   (Claude)      │   Generates insights
+└─────────────────┘
+⚠️ Prerequisites - MUST BE DEPLOYED FIRST
+This Streamlit app will NOT work without the following infrastructure:
+1. Data Collection Infrastructure (Not included in this repo)
+You need to set up:
+A. Lambda Function for Event Collection
+python# lambda_function.py - Deploy this to AWS Lambda
+import json
+import boto3
+import os
+from datetime import datetime
+
+s3 = boto3.client('s3')
+S3_BUCKET = os.environ['S3_BUCKET']  # Your S3 bucket
+S3_PREFIX = os.environ.get('S3_PREFIX', 'pipeline-events')
+
+def lambda_handler(event, context):
+    """Captures CodePipeline events from EventBridge"""
+    detail = event.get('detail', {})
+    event_time = event.get('time', datetime.utcnow().isoformat())
+    
+    # Structure the data for Athena
+    pipeline_data = {
+        'account': event.get('account'),
+        'time': event_time,
+        'region': event.get('region'),
+        'pipeline': detail.get('pipeline'),
+        'execution_id': detail.get('execution-id'),
+        'start_time': detail.get('start-time', event_time),
+        'stage': detail.get('stage', 'Unknown'),
+        'action': detail.get('action', 'Unknown'),
+        'state': detail.get('state'),
+    }
+    
+    # Write to S3 with date partitioning
+    dt = datetime.fromisoformat(event_time.replace('Z', '+00:00'))
+    s3_key = f"{S3_PREFIX}/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/{detail.get('execution-id')}_{dt.strftime('%H%M%S')}.json"
+    
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=s3_key,
+        Body=json.dumps(pipeline_data)
+    )
+    
+    return {'statusCode': 200}
+B. EventBridge Rule
+json{
+  "source": ["aws.codepipeline"],
+  "detail-type": [
+    "CodePipeline Pipeline Execution State Change",
+    "CodePipeline Stage Execution State Change",
+    "CodePipeline Action Execution State Change"
+  ]
+}
+Target: Your Lambda function
+C. S3 Bucket Structure
+s3://your-bucket/
+└── pipeline-events/
+    ├── year=2024/
+    │   ├── month=01/
+    │   │   ├── day=01/
+    │   │   │   ├── exec-123_143022.json
+    │   │   │   └── exec-124_150533.json
+    │   │   └── day=02/
+    │   └── month=02/
+    └── year=2025/
+2. Athena Table Setup
+Run this SQL in Athena to create the table:
+sql-- Create database
+CREATE DATABASE IF NOT EXISTS cicd_analytics;
+
+-- Create external table pointing to S3
+CREATE EXTERNAL TABLE IF NOT EXISTS cicd_analytics.pipeline_events (
+    account string,
+    time string,
+    region string,
+    pipeline string,
+    execution_id string,
+    start_time string,
+    stage string,
+    action string,
+    state string
+)
+PARTITIONED BY (
+    year int,
+    month int,
+    day int
+)
+STORED AS JSON
+LOCATION 's3://your-bucket/pipeline-events/'
+;
+
+-- Load existing partitions
+MSCK REPAIR TABLE cicd_analytics.pipeline_events;
+3. Required IAM Permissions
+The execution environment needs:
+
+Athena: Query execution and result retrieval
+S3: Read from data bucket, write to Athena results bucket
+Bedrock: Invoke model for AI responses
+Glue: Access to data catalog (if using Glue)
+
+4. S3 Buckets Required
+
+Data Bucket: s3://your-bucket/pipeline-events/ - Where Lambda writes events
+Athena Results: s3://your-athena-results/ - Query result storage
+
+🚀 Setting Up This Application
+1. Clone and Install
+bashgit clone <this-repo>
+cd devops-pipeline-chatbot
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+2. Configure Environment
+Create .env file:
+env# AWS Configuration
+AWS_REGION=us-west-2
+
+# Athena Configuration - MUST match your infrastructure
+ATHENA_DATABASE=cicd_analytics
+ATHENA_TABLE=pipeline_events
+ATHENA_OUTPUT_BUCKET=s3://your-athena-results/query-results/
+
+# Bedrock Configuration
+BEDROCK_MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0
+
+# Optional: If not using IAM roles
+AWS_ACCESS_KEY_ID=your-key
+AWS_SECRET_ACCESS_KEY=your-secret
+3. Verify Infrastructure
+Before running the app, verify:
+sql-- Run in Athena console
+SELECT COUNT(*) FROM cicd_analytics.pipeline_events;
+-- Should return > 0 rows
+4. Run Application
+bashstreamlit run app.py
+Access at http://localhost:8501
+📊 Data Flow Explanation
+
+CodePipeline executes and emits state change events
+EventBridge catches these events based on rule patterns
+Lambda transforms events into structured JSON and writes to S3
+S3 stores events partitioned by date for efficient querying
+Athena provides SQL interface to query S3 data
+This App queries Athena and uses Bedrock AI to interpret results
+User gets natural language responses about pipeline performance
+
+🔍 What This App Does
+
+Queries: Executes SQL against Athena to retrieve pipeline data
+Preprocesses: Cleans and structures data for analysis
+Summarizes: Generates statistics about pipeline executions
+AI Analysis: Uses AWS Bedrock (Claude) to interpret natural language questions
+Chat Interface: Maintains conversation history for contextual discussions
+
+🛠 Troubleshooting
+"No data to process"
+
+❌ Lambda not deployed or not triggered
+❌ EventBridge rule not configured correctly
+❌ S3 bucket permissions issue
+✅ Check Lambda CloudWatch logs
+✅ Verify EventBridge rule is active
+✅ Run test pipeline execution
+
+"Query failed"
+
+❌ Athena table doesn't exist
+❌ Wrong database/table name in .env
+❌ S3 permissions issue
+✅ Verify table exists: SHOW TABLES IN cicd_analytics;
+✅ Check IAM permissions for Athena
+
+"Bedrock error"
+
+❌ Model ID incorrect
+❌ Region doesn't support Bedrock
+❌ No Bedrock access
+✅ Enable Bedrock in AWS Console
+✅ Check model availability in your region
+
+📈 Sample Queries You Can Ask
+
+"How many pipeline executions failed today?"
+"What's the success rate of deployments this week?"
+"Which pipeline has the most failures?"
+"Show me the latest execution status"
+"What stages are failing most often?"
+"Compare this week's performance to last week"
