@@ -2,10 +2,7 @@
 SNS Tools — publish pipeline alerts via AWS SNS.
 """
 
-from __future__ import annotations
-
 import os
-import json
 
 import boto3
 
@@ -15,15 +12,14 @@ except ImportError:
     def tool(fn):
         return fn
 
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
 SNS_TOPIC_ARN = os.getenv("SNS_TOPIC_ARN", "")
 
 
 @tool
-def send_sns_alert(pipeline_name: str, message: str, severity: str = "WARNING") -> str:
+def send_sns_alert(pipeline_name, message, severity="WARNING"):
     """
     Send an SNS notification alert about a pipeline issue.
-    Use this when the user asks to alert the team or when a critical issue is detected.
 
     Severity levels: INFO | WARNING | CRITICAL
 
@@ -37,21 +33,11 @@ def send_sns_alert(pipeline_name: str, message: str, severity: str = "WARNING") 
     """
     if not SNS_TOPIC_ARN:
         return "Error: SNS_TOPIC_ARN environment variable not set."
-
     client = boto3.client("sns", region_name=AWS_REGION)
     subject = f"[{severity}] Pipeline Alert: {pipeline_name}"
-    body = f"""Pipeline Alert
-==================
-Pipeline : {pipeline_name}
-Severity : {severity}
-Message  : {message}
-"""
+    body = f"Pipeline: {pipeline_name}\nSeverity: {severity}\nMessage: {message}"
     try:
-        response = client.publish(
-            TopicArn=SNS_TOPIC_ARN,
-            Subject=subject,
-            Message=body,
-        )
+        response = client.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject, Message=body)
         return f"Alert sent. SNS MessageId: {response['MessageId']}"
     except Exception as e:
         return f"SNS publish error: {e}"

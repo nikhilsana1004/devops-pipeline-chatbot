@@ -1,26 +1,22 @@
 """
 Athena Tools — query CI/CD pipeline data stored in AWS Athena.
 
-This matches the real pipeline_executions table schema from the original app:
-
-  account       STRING   — AWS account ID
-  time          TIMESTAMP — event time
-  region        STRING   — AWS region
-  pipeline      STRING   — CodePipeline name
-  execution_id  STRING   — unique execution UUID
-  start_time    TIMESTAMP — execution start time
-  stage         STRING   — pipeline stage (Source / Build / Deploy / Approval)
-  action        STRING   — action name within the stage
-  state         STRING   — STARTED | SUCCEEDED | FAILED | STOPPED
+Table schema (pipeline_executions):
+  account       STRING    — AWS account ID
+  time          TIMESTAMP — event timestamp
+  region        STRING    — AWS region
+  pipeline      STRING    — CodePipeline name
+  execution_id  STRING    — unique execution UUID
+  start_time    TIMESTAMP — execution start time (sort by this)
+  stage         STRING    — Source / Build / Deploy / Approval
+  action        STRING    — action name within the stage
+  state         STRING    — STARTED / SUCCEEDED / FAILED / STOPPED
 """
-
-from __future__ import annotations
 
 import os
 import time as time_module
 import json
 import boto3
-from typing import Optional
 
 try:
     from strands import tool
@@ -35,10 +31,9 @@ ATHENA_OUTPUT_BUCKET = os.getenv("ATHENA_OUTPUT_BUCKET", "s3://your-bucket/athen
 AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
 
 
-def _run_query(sql: str, region: str = AWS_REGION) -> list[dict]:
+def _run_query(sql, region=AWS_REGION):
     """Execute an Athena query and return rows as list-of-dicts."""
     client = boto3.client("athena", region_name=region)
-
     response = client.start_query_execution(
         QueryString=sql,
         QueryExecutionContext={"Database": ATHENA_DATABASE},
@@ -57,9 +52,8 @@ def _run_query(sql: str, region: str = AWS_REGION) -> list[dict]:
         time_module.sleep(1)
 
     paginator = client.get_paginator("get_query_results")
-    rows: list[dict] = []
-    headers: list[str] = []
-
+    rows = []
+    headers = []
     for page in paginator.paginate(QueryExecutionId=execution_id):
         result_rows = page["ResultSet"]["Rows"]
         if not headers:
@@ -68,25 +62,24 @@ def _run_query(sql: str, region: str = AWS_REGION) -> list[dict]:
         for row in result_rows:
             values = [col.get("VarCharValue", "") for col in row["Data"]]
             rows.append(dict(zip(headers, values)))
-
     return rows
 
 
 @tool
-def query_athena(sql: str) -> str:
+def query_athena(sql):
     """
-    Run a SQL SELECT query against the pipeline_executions table in AWS Athena.
+    Run a SQL SELECT query against the pipeline_executions table in Athena.
 
-    Table columns: account, time, region, pipeline, execution_id,
+    Columns: account, time, region, pipeline, execution_id,
     start_time, stage, action, state (STARTED/SUCCEEDED/FAILED/STOPPED).
 
-    Always ORDER BY start_time DESC for latest results. Always include LIMIT.
+    Always ORDER BY start_time DESC. Always include LIMIT.
 
     Args:
         sql: A valid Athena/Presto SQL SELECT statement.
 
     Returns:
-        JSON string with query results, or an error message.
+        JSON string with results, or an error message.
     """
     if not sql.strip().upper().startswith("SELECT"):
         return "Error: Only SELECT queries are permitted."
@@ -102,7 +95,7 @@ def query_athena(sql: str) -> str:
 
 
 @tool
-def get_table_schema() -> str:
+def get_table_schema():
     """
     Return the schema of the pipeline_executions Athena table.
 
@@ -119,48 +112,45 @@ def get_table_schema() -> str:
             lines.append(f"| {col} | {typ} | {comment} |")
         return "\n".join(lines)
     except Exception:
-        return """
-## pipeline_executions schema
-
-| Column | Type | Description |
-|---|---|---|
-| account | STRING | AWS account ID |
-| time | TIMESTAMP | Event timestamp |
-| region | STRING | AWS region (e.g. us-west-2) |
-| pipeline | STRING | CodePipeline name |
-| execution_id | STRING | Unique execution UUID |
-| start_time | TIMESTAMP | Execution start time (UTC) |
-| stage | STRING | Stage: Source / Build / Deploy / Approval |
-| action | STRING | Action name within the stage |
-| state | STRING | STARTED / SUCCEEDED / FAILED / STOPPED |
-"""
+        return (
+            "## pipeline_executions schema\n\n"
+            "| Column | Type | Description |\n"
+            "|---|---|---|\n"
+            "| account | STRING | AWS account ID |\n"
+            "| time | TIMESTAMP | Event timestamp |\n"
+            "| region | STRING | AWS region |\n"
+            "| pipeline | STRING | CodePipeline name |\n"
+            "| execution_id | STRING | Unique execution UUID |\n"
+            "| start_time | TIMESTAMP | Execution start time (UTC) |\n"
+            "| stage | STRING | Source / Build / Deploy / Approval |\n"
+            "| action | STRING | Action name within the stage |\n"
+            "| state | STRING | STARTED / SUCCEEDED / FAILED / STOPPED |\n"
+        )
 
 
 @tool
-def get_pipeline_summary() -> str:
+def get_pipeline_summary():
     """
-    Generate a high-level summary of all pipeline data:
-    total events, unique pipelines, executions, state breakdown,
-    regions, accounts, and latest/earliest execution times.
+    Generate a high-level summary: total events, unique pipelines,
+    executions, state breakdown, region/account counts, time range.
 
     Returns:
         JSON summary object.
     """
-    sql = f"""
-    SELECT
-        COUNT(*)                                              AS total_events,
-        COUNT(DISTINCT pipeline)                              AS unique_pipelines,
-        COUNT(DISTINCT execution_id)                          AS unique_executions,
-        COUNT(DISTINCT region)                                AS region_count,
-        COUNT(DISTINCT account)                               AS account_count,
-        MIN(CAST(start_time AS VARCHAR))                      AS earliest_execution,
-        MAX(CAST(start_time AS VARCHAR))                      AS latest_execution,
-        SUM(CASE WHEN state = 'SUCCEEDED' THEN 1 ELSE 0 END) AS succeeded,
-        SUM(CASE WHEN state = 'FAILED'    THEN 1 ELSE 0 END) AS failed,
-        SUM(CASE WHEN state = 'STARTED'   THEN 1 ELSE 0 END) AS started,
-        SUM(CASE WHEN state = 'STOPPED'   THEN 1 ELSE 0 END) AS stopped
-    FROM {ATHENA_TABLE}
-    """
+    sql = (
+        f"SELECT COUNT(*) AS total_events,"
+        f" COUNT(DISTINCT pipeline) AS unique_pipelines,"
+        f" COUNT(DISTINCT execution_id) AS unique_executions,"
+        f" COUNT(DISTINCT region) AS region_count,"
+        f" COUNT(DISTINCT account) AS account_count,"
+        f" MIN(CAST(start_time AS VARCHAR)) AS earliest_execution,"
+        f" MAX(CAST(start_time AS VARCHAR)) AS latest_execution,"
+        f" SUM(CASE WHEN state = 'SUCCEEDED' THEN 1 ELSE 0 END) AS succeeded,"
+        f" SUM(CASE WHEN state = 'FAILED' THEN 1 ELSE 0 END) AS failed,"
+        f" SUM(CASE WHEN state = 'STARTED' THEN 1 ELSE 0 END) AS started,"
+        f" SUM(CASE WHEN state = 'STOPPED' THEN 1 ELSE 0 END) AS stopped"
+        f" FROM {ATHENA_TABLE}"
+    )
     try:
         rows = _run_query(sql)
         return json.dumps(rows[0] if rows else {}, indent=2, default=str)
@@ -169,7 +159,7 @@ def get_pipeline_summary() -> str:
 
 
 @tool
-def get_failed_pipelines(hours: int = 24) -> str:
+def get_failed_pipelines(hours=24):
     """
     List pipelines with FAILED state in the last N hours,
     including the stage and action where the failure occurred.
@@ -180,21 +170,14 @@ def get_failed_pipelines(hours: int = 24) -> str:
     Returns:
         JSON list of failed executions, most recent first.
     """
-    sql = f"""
-    SELECT
-        pipeline,
-        execution_id,
-        stage,
-        action,
-        CAST(start_time AS VARCHAR) AS start_time,
-        region,
-        account
-    FROM {ATHENA_TABLE}
-    WHERE state = 'FAILED'
-      AND start_time >= current_timestamp - INTERVAL '{hours}' HOUR
-    ORDER BY start_time DESC
-    LIMIT 50
-    """
+    sql = (
+        f"SELECT pipeline, execution_id, stage, action,"
+        f" CAST(start_time AS VARCHAR) AS start_time, region, account"
+        f" FROM {ATHENA_TABLE}"
+        f" WHERE state = 'FAILED'"
+        f" AND start_time >= current_timestamp - INTERVAL '{hours}' HOUR"
+        f" ORDER BY start_time DESC LIMIT 50"
+    )
     try:
         rows = _run_query(sql)
         if not rows:

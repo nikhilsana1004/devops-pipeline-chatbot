@@ -2,12 +2,9 @@
 CloudWatch Tools — pull pipeline metrics and alarms from AWS CloudWatch.
 """
 
-from __future__ import annotations
-
 import os
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 import boto3
 
@@ -17,31 +14,22 @@ except ImportError:
     def tool(fn):
         return fn
 
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
 
 
 @tool
-def get_cloudwatch_metrics(
-    pipeline_name: str,
-    metric_name: str = "SucceededBuilds",
-    hours: int = 24,
-    period_seconds: int = 3600,
-) -> str:
+def get_cloudwatch_metrics(pipeline_name, metric_name="SucceededBuilds", hours=24, period_seconds=3600):
     """
     Retrieve CloudWatch metrics for a CodePipeline or CodeBuild project.
 
-    Useful metrics:
-      - SucceededBuilds   (CodeBuild)
-      - FailedBuilds      (CodeBuild)
-      - Duration          (CodeBuild, in seconds)
-      - PipelineExecutionFailure  (CodePipeline)
-      - PipelineExecutionSuccess  (CodePipeline)
+    Useful metrics: SucceededBuilds, FailedBuilds, Duration (CodeBuild),
+    PipelineExecutionFailure, PipelineExecutionSuccess (CodePipeline).
 
     Args:
         pipeline_name: Name of the pipeline or build project.
         metric_name: CloudWatch metric name (default: SucceededBuilds).
         hours: Look-back window in hours (default: 24).
-        period_seconds: Aggregation period in seconds (default: 3600 = 1 hour).
+        period_seconds: Aggregation period in seconds (default: 3600).
 
     Returns:
         JSON with metric datapoints or an error message.
@@ -50,7 +38,6 @@ def get_cloudwatch_metrics(
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(hours=hours)
 
-    # Try CodeBuild namespace first, then CodePipeline
     namespaces = ["AWS/CodeBuild", "AWS/CodePipeline"]
     dimension_keys = {
         "AWS/CodeBuild": "ProjectName",
@@ -69,10 +56,7 @@ def get_cloudwatch_metrics(
                 Period=period_seconds,
                 Statistics=["Sum", "Average", "Maximum"],
             )
-            datapoints = sorted(
-                response.get("Datapoints", []),
-                key=lambda x: x["Timestamp"],
-            )
+            datapoints = sorted(response.get("Datapoints", []), key=lambda x: x["Timestamp"])
             if datapoints:
                 result = {
                     "pipeline": pipeline_name,
@@ -97,10 +81,9 @@ def get_cloudwatch_metrics(
 
 
 @tool
-def get_cloudwatch_alarms(pipeline_name: Optional[str] = None) -> str:
+def get_cloudwatch_alarms(pipeline_name=None):
     """
     List CloudWatch alarms related to DevOps pipelines.
-    Returns alarm names, states, and threshold conditions.
 
     Args:
         pipeline_name: Optional filter — only return alarms mentioning this pipeline.
@@ -109,7 +92,6 @@ def get_cloudwatch_alarms(pipeline_name: Optional[str] = None) -> str:
         JSON list of alarm states.
     """
     client = boto3.client("cloudwatch", region_name=AWS_REGION)
-
     try:
         paginator = client.get_paginator("describe_alarms")
         alarms = []
@@ -118,6 +100,8 @@ def get_cloudwatch_alarms(pipeline_name: Optional[str] = None) -> str:
                 name = alarm.get("AlarmName", "")
                 if pipeline_name and pipeline_name.lower() not in name.lower():
                     continue
+                ts = alarm.get("StateUpdatedTimestamp", "")
+                updated = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
                 alarms.append({
                     "name": name,
                     "state": alarm.get("StateValue"),
@@ -125,11 +109,8 @@ def get_cloudwatch_alarms(pipeline_name: Optional[str] = None) -> str:
                     "metric": alarm.get("MetricName"),
                     "threshold": alarm.get("Threshold"),
                     "comparison": alarm.get("ComparisonOperator"),
-                    "updated": alarm.get("StateUpdatedTimestamp", "").isoformat()
-                    if hasattr(alarm.get("StateUpdatedTimestamp", ""), "isoformat")
-                    else str(alarm.get("StateUpdatedTimestamp", "")),
+                    "updated": updated,
                 })
-
         if not alarms:
             return json.dumps({"message": "No alarms found matching the filter."})
         return json.dumps(alarms, indent=2)

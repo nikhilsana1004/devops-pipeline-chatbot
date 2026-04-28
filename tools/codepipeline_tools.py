@@ -2,11 +2,8 @@
 CodePipeline Tools — real-time pipeline status via AWS CodePipeline API.
 """
 
-from __future__ import annotations
-
 import os
 import json
-from typing import Optional
 
 import boto3
 
@@ -16,17 +13,16 @@ except ImportError:
     def tool(fn):
         return fn
 
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
 
 
 @tool
-def list_pipelines() -> str:
+def list_pipelines():
     """
     List all AWS CodePipelines in the account and region.
-    Returns pipeline names and their last updated timestamps.
 
     Returns:
-        JSON list of pipelines.
+        JSON list of pipeline names and last updated timestamps.
     """
     client = boto3.client("codepipeline", region_name=AWS_REGION)
     try:
@@ -45,7 +41,7 @@ def list_pipelines() -> str:
 
 
 @tool
-def get_pipeline_status(pipeline_name: str) -> str:
+def get_pipeline_status(pipeline_name):
     """
     Get the current real-time status of a specific AWS CodePipeline,
     including each stage and action state.
@@ -68,36 +64,30 @@ def get_pipeline_status(pipeline_name: str) -> str:
                     "action": action.get("actionName"),
                     "status": latest.get("status"),
                     "summary": latest.get("summary", "")[:200],
-                    "last_status_change": str(action.get("latestExecution", {}).get("lastStatusChange", "")),
-                    "external_url": action.get("entityUrl", ""),
+                    "last_status_change": str(latest.get("lastStatusChange", "")),
                 })
             stages.append({
                 "stage": stage.get("stageName"),
                 "status": stage.get("latestExecution", {}).get("status"),
                 "actions": actions,
             })
-
         return json.dumps({
             "pipeline": pipeline_name,
-            "created": str(response.get("created", "")),
             "updated": str(response.get("updated", "")),
             "stages": stages,
         }, indent=2)
-    except client.exceptions.PipelineNotFoundException:
-        return f"Pipeline '{pipeline_name}' not found in region {AWS_REGION}."
     except Exception as e:
         return f"CodePipeline status error: {e}"
 
 
 @tool
-def get_pipeline_executions(pipeline_name: str, max_results: int = 10) -> str:
+def get_pipeline_executions(pipeline_name, max_results=10):
     """
     Get recent execution history for a CodePipeline.
-    Shows execution IDs, statuses, start/end times, and trigger info.
 
     Args:
         pipeline_name: The CodePipeline name.
-        max_results: Max number of executions to return (default 10, max 100).
+        max_results: Max executions to return (default 10, max 100).
 
     Returns:
         JSON list of execution summaries.
