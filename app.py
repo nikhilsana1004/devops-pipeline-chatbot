@@ -1,232 +1,208 @@
+"""
+DevOps Pipeline Chatbot — Enhanced with AWS Strands Agents
+==========================================================
+Original by: Nikhil Sana (@nikhilsana1004)
+v2 upgrade: Strands Agents SDK · multi-tool · conversation memory · MCP server
+
+Preserves the original UX ("Chat with your CI/CD pipelines") while adding:
+  - Agentic tool selection (Athena + CloudWatch + CodePipeline + SNS)
+  - Conversation memory across turns
+  - Sidebar tool toggles & model picker
+  - Tool-call inspector per response
+  - Quick-stats dashboard row
+"""
+
 import streamlit as st
-import boto3
-import pandas as pd
-import json
 import os
-import time
-from botocore.exceptions import ClientError
-import logging
-from typing import Dict, Any
-from dateutil.parser import parse
+from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+from agents.pipeline_agent import PipelineAgent
+from utils.session import init_session_state, add_to_history
+from utils.formatters import format_agent_response, format_tool_calls
+
 load_dotenv()
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# ── Page Config ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="DevOps Pipeline Chatbot",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# Load configuration from environment variables
-AWS_REGION = os.getenv('AWS_REGION', 'us-west-2')
-ATHENA_DATABASE = os.getenv('ATHENA_DATABASE')
-ATHENA_TABLE = os.getenv('ATHENA_TABLE')
-ATHENA_OUTPUT_BUCKET = os.getenv('ATHENA_OUTPUT_BUCKET')
-BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'anthropic.claude-3-sonnet-20240229-v1:0')
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        padding: 1.5rem 2rem;
+        border-radius: 12px;
+        margin-bottom: 1.2rem;
+        color: white;
+    }
+    .main-header h1 { margin: 0 0 0.3rem 0; font-size: 1.8rem; }
+    .main-header p  { margin: 0; opacity: 0.75; font-size: 0.9rem; }
+    .agent-thinking { color: #888; font-style: italic; font-size: 0.85rem; }
+</style>
+""", unsafe_allow_html=True)
 
-# Initialize AWS clients
-athena = boto3.client('athena', region_name=AWS_REGION)
-s3 = boto3.client('s3', region_name=AWS_REGION)
-bedrock = boto3.client('bedrock-runtime', region_name=AWS_REGION)
+# ── Session State ──────────────────────────────────────────────────────────────
+init_session_state()
 
-def run_athena_query(query: str) -> pd.DataFrame:
-    """Execute an Athena query and return results as a DataFrame."""
-    query_execution = athena.start_query_execution(
-        QueryString=query,
-        QueryExecutionContext={'Database': ATHENA_DATABASE},
-        ResultConfiguration={'OutputLocation': ATHENA_OUTPUT_BUCKET}
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## ⚙️ Configuration")
+
+    aws_region = st.selectbox(
+        "AWS Region",
+        ["us-west-2", "us-east-1", "eu-west-1", "ap-southeast-1"],
+        index=0,
     )
-    
-    query_execution_id = query_execution['QueryExecutionId']
-    
-    # Wait for query to complete
-    while True:
-        query_status = athena.get_query_execution(QueryExecutionId=query_execution_id)
-        state = query_status['QueryExecution']['Status']['State']
-        if state in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-            break
-        time.sleep(1)
-    
-    if state == 'SUCCEEDED':
-        results = athena.get_query_results(QueryExecutionId=query_execution_id)
-        columns = [col['Name'] for col in results['ResultSet']['ResultSetMetadata']['ColumnInfo']]
-        data = []
-        for row in results['ResultSet']['Rows'][1:]:  # Skip the header row
-            data.append([field.get('VarCharValue', '') for field in row['Data']])
-        return pd.DataFrame(data, columns=columns)
-    else:
-        logger.error(f"Query failed with state: {state}")
-        return pd.DataFrame()
 
-def safe_parse_datetime(date_string: str) -> pd.Timestamp:
-    """Safely parse datetime strings with multiple format attempts."""
-    if not date_string or date_string == 'Unknown':
-        return pd.NaT
-    try:
-        return pd.to_datetime(date_string, format='%Y-%m-%dT%H:%M:%S.%fZ', utc=True)
-    except ValueError:
-        try:
-            return pd.to_datetime(date_string, format='%Y-%m-%dT%H:%M:%SZ', utc=True)
-        except ValueError:
-            return pd.NaT
+    model_id = st.selectbox(
+        "Bedrock Model",
+        [
+            "anthropic.claude-3-sonnet-20240229-v1:0",   # original default
+            "anthropic.claude-sonnet-4-5",
+            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.amazon.nova-premier-v1:0",
+        ],
+        index=0,
+    )
 
-def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocess the pipeline data."""
-    # Convert timestamps
-    timestamp_columns = ['time', 'start_time']
-    for col in timestamp_columns:
-        if col in df.columns:
-            df[col] = df[col].apply(safe_parse_datetime)
+    st.markdown("---")
+    st.markdown("### 🛠️ Active Tools")
+    use_athena       = st.toggle("Athena (pipeline data)",    value=True)
+    use_cloudwatch   = st.toggle("CloudWatch (metrics)",      value=True)
+    use_codepipeline = st.toggle("CodePipeline (live status)", value=True)
+    use_s3           = st.toggle("S3 Artifacts",               value=False)
+    use_sns          = st.toggle("SNS Alerts",                 value=False)
 
-    # Ensure all expected columns are present
-    expected_columns = ['account', 'time', 'region', 'pipeline', 'execution_id', 'start_time', 'stage', 'action', 'state']
-    for col in expected_columns:
-        if col not in df.columns:
-            df[col] = 'Unknown'
+    st.markdown("---")
+    st.markdown("### 🧠 Memory")
+    memory_enabled = st.toggle("Conversation Memory", value=True)
+    if st.button("🗑️ Clear Chat"):
+        st.session_state.chat_history = []
+        st.session_state.agent_memory = []
+        st.rerun()
 
-    # Sort the dataframe by start_time
-    df = df.sort_values('start_time', ascending=False)
+    st.markdown("---")
+    st.markdown("### Stack")
+    st.markdown("""
+`Strands Agents SDK`  
+`AWS Bedrock` · `Athena`  
+`CloudWatch` · `CodePipeline`  
+`MCP Server` · `Streamlit`
+    """)
 
-    return df
+# ── Header ─────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="main-header">
+    <h1>🚀 Chat with your CI/CD pipelines</h1>
+    <p>Powered by AWS Strands Agents · Bedrock · Athena · CloudWatch · CodePipeline</p>
+</div>
+""", unsafe_allow_html=True)
 
-def get_pipeline_summary(df: pd.DataFrame) -> Dict[str, Any]:
-    """Generate a summary of the pipeline data."""
-    summary = {
-        "total_events": len(df),
-        "unique_pipelines": df['pipeline'].nunique(),
-        "unique_executions": df['execution_id'].nunique(),
-        "regions": df['region'].unique().tolist(),
-        "stages": df['stage'].unique().tolist(),
-        "actions": df['action'].unique().tolist(),
-        "states": df['state'].value_counts().to_dict(),
-        "accounts_involved": df['account'].unique().tolist(),
-        "latest_execution_time": df['start_time'].max(),
-        "earliest_execution_time": df['start_time'].min(),
-        "latest_execution_id": df.loc[df['start_time'].idxmax(), 'execution_id'] if not df.empty else "No executions",
+# ── Quick Stats (populated after a summary query) ──────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total Events",   st.session_state.get("stat_events", "—"))
+c2.metric("Unique Pipelines", st.session_state.get("stat_pipelines", "—"))
+c3.metric("Failures (24h)", st.session_state.get("stat_failed", "—"))
+c4.metric("Success Rate",   st.session_state.get("stat_success_rate", "—"))
+
+st.markdown("---")
+
+# ── Chat History ───────────────────────────────────────────────────────────────
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("tool_calls"):
+            with st.expander("🔧 Tools Used", expanded=False):
+                st.code(format_tool_calls(msg["tool_calls"]), language="json")
+        if msg.get("timestamp"):
+            st.caption(f"🕐 {msg['timestamp']}")
+
+# ── Suggested Prompts (shown on first load) ────────────────────────────────────
+if not st.session_state.chat_history:
+    st.markdown("#### 💡 Try asking:")
+    suggestions = [
+        "What is the status of the latest pipeline execution?",
+        "Which pipelines failed in the last 24 hours?",
+        "Show all pipelines running in us-east-1",
+        "Which pipeline has the most failures?",
+        "Give me a summary of all pipeline activity",
+        "Which stage causes the most failures?",
+    ]
+    cols = st.columns(3)
+    for i, s in enumerate(suggestions):
+        with cols[i % 3]:
+            if st.button(s, key=f"sug_{i}", use_container_width=True):
+                st.session_state.pending_prompt = s
+                st.rerun()
+
+# ── Chat Input ─────────────────────────────────────────────────────────────────
+prompt = st.chat_input("What would you like to know about the CI/CD pipeline?")
+
+if "pending_prompt" in st.session_state:
+    prompt = st.session_state.pop("pending_prompt")
+
+if prompt:
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    add_to_history("user", prompt)
+
+    tool_config = {
+        "use_athena":       use_athena,
+        "use_cloudwatch":   use_cloudwatch,
+        "use_codepipeline": use_codepipeline,
+        "use_s3":           use_s3,
+        "use_sns":          use_sns,
+        "aws_region":       aws_region,
+        "model_id":         model_id,
+        "memory_enabled":   memory_enabled,
+        "chat_history":     st.session_state.agent_memory if memory_enabled else [],
     }
 
-    return summary
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        placeholder.markdown('<p class="agent-thinking">🧠 Agent is thinking…</p>', unsafe_allow_html=True)
 
-def get_column_descriptions(df: pd.DataFrame) -> str:
-    """Generate descriptions of DataFrame columns."""
-    descriptions = []
-    for col in df.columns:
-        dtype = df[col].dtype
-        unique_count = df[col].nunique()
-        non_null_count = df[col].count()
-        null_count = df[col].isnull().sum()
-        sample_values = ", ".join(map(str, df[col].dropna().sample(min(3, unique_count)).tolist()))
-        descriptions.append(f"- {col}: {dtype}, {unique_count} unique values, {non_null_count} non-null, {null_count} null. Sample values: {sample_values}")
-    return "\n".join(descriptions)
+        try:
+            agent = PipelineAgent(tool_config)
+            result = agent.run(prompt)
+            placeholder.empty()
 
-def query_bedrock_with_context(query: str, df: pd.DataFrame, summary: Dict[str, Any]) -> str:
-    """Query AWS Bedrock with context about the pipeline data."""
-    column_descriptions = get_column_descriptions(df)
-    
-    messages = [
-        {
-            "role": "user",
-            "content": f"""You are an AI assistant specialized in analyzing CI/CD pipeline data. Provide concise, data-driven answers to questions about the pipeline. Use the provided summary and data structure to support your responses. Do not explain how to analyze the data or provide code solutions.
+            response_text = format_agent_response(result)
+            st.markdown(response_text)
 
-Here's a summary of the CI/CD pipeline data:
+            tool_calls = result.get("tool_calls", [])
+            if tool_calls:
+                with st.expander("🔧 Tools Used", expanded=False):
+                    st.code(format_tool_calls(tool_calls), language="json")
 
-Total Events: {summary['total_events']}
-Unique Pipelines: {summary['unique_pipelines']}
-Unique Executions: {summary['unique_executions']}
-Regions: {', '.join(summary['regions'])}
-Stages: {', '.join(summary['stages'])}
-Actions: {', '.join(summary['actions'])}
-States: {json.dumps(summary['states'])}
-Latest Execution Time: {summary['latest_execution_time']}
-Earliest Execution Time: {summary['earliest_execution_time']}
-Latest Execution ID: {summary['latest_execution_id']}
-Accounts Involved: {', '.join(summary['accounts_involved'])}
+            ts = datetime.now().strftime("%H:%M:%S")
+            st.caption(f"🕐 {ts} · {model_id.split('/')[-1]}")
 
-The dataset contains the following columns:
+            # Update memory
+            if memory_enabled:
+                st.session_state.agent_memory.append({"role": "user", "content": [{"text": prompt}]})
+                st.session_state.agent_memory.append({"role": "assistant", "content": [{"text": response_text}]})
+                st.session_state.agent_memory = st.session_state.agent_memory[-40:]
 
-{column_descriptions}
+            add_to_history("assistant", response_text, tool_calls=tool_calls, timestamp=ts)
 
-Based on this information, please answer the following question:
-{query}
+            # Update quick-stats if summary data is present
+            stats = result.get("stats", {})
+            if stats:
+                st.session_state.stat_events    = stats.get("total_events", "—")
+                st.session_state.stat_pipelines = stats.get("unique_pipelines", "—")
+                st.session_state.stat_failed    = stats.get("failed", "—")
+                total = int(stats.get("total_events", 0) or 0)
+                succ  = int(stats.get("succeeded", 0) or 0)
+                if total:
+                    st.session_state.stat_success_rate = f"{round(succ/total*100)}%"
 
-Please provide your concise and data-driven response here, ensuring each distinct piece of information is on a separate line, prefixed with a hyphen and a space."""
-        }
-    ]
-
-    try:
-        response = bedrock.invoke_model(
-            modelId=BEDROCK_MODEL_ID,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 1000,
-                "messages": messages
-            })
-        )
-        return json.loads(response['body'].read())['content'][0]['text']
-    except ClientError as e:
-        logger.error(f"Error querying Bedrock: {e}")
-        return "I'm sorry, but I encountered an error while trying to analyze the data. Please try again later or contact support if the problem persists."
-
-@st.cache_data
-def load_and_preprocess_data():
-    """Load data from Athena and preprocess it."""
-    logger.info(f"Loading data from Athena table: {ATHENA_DATABASE}.{ATHENA_TABLE}")
-    query = f"SELECT * FROM {ATHENA_TABLE}"
-    raw_data = run_athena_query(query)
-    
-    if raw_data.empty:
-        logger.error("No data to process.")
-        return None, None
-    
-    logger.info(f"Data loaded successfully. Shape: {raw_data.shape}")
-    
-    logger.info("Preprocessing data")
-    preprocessed_data = preprocess_data(raw_data)
-    
-    logger.info("Generating pipeline summary")
-    summary = get_pipeline_summary(preprocessed_data)
-    
-    return preprocessed_data, summary
-
-def main():
-    """Main application function."""
-    st.title("Chat with your CI/CD pipelines")
-
-    # Load and preprocess data
-    preprocessed_data, summary = load_and_preprocess_data()
-
-    if preprocessed_data is None or summary is None:
-        st.error("Failed to load and preprocess data. Please check your Athena table and credentials.")
-        return
-
-    st.write(f"Total events loaded: {len(preprocessed_data)}")
-
-    # Initialize chat history
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # Display chat messages from history on app rerun
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # React to user input
-    if prompt := st.chat_input("What would you like to know about the CI/CD pipeline?"):
-        # Display user message in chat message container
-        st.chat_message("user").markdown(prompt)
-        # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": prompt})
-
-        # Generate response
-        response = query_bedrock_with_context(prompt, preprocessed_data, summary)
-
-        # Display assistant response in chat message container
-        with st.chat_message("assistant"):
-            st.markdown(response)
-        # Add assistant response to chat history
-        st.session_state.messages.append({"role": "assistant", "content": response})
-
-if __name__ == "__main__":
-    main()
+        except Exception as e:
+            placeholder.empty()
+            st.error(f"❌ Agent error: {str(e)}")
+            st.info("💡 Check your AWS credentials and `.env` variables. See `.env.example` for reference.")

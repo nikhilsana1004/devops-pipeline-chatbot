@@ -1,109 +1,246 @@
-# 🚀 CI/CD Pipeline Chatbot
+# 🚀 DevOps Pipeline Chatbot
 
-A Streamlit-based chatbot powered by AWS Bedrock (Claude 3.5 Sonnet) that provides intelligent insights on CI/CD pipeline data stored in AWS Athena.
+> Talk to your CI/CD pipelines in natural language.  
+> **v2 — Powered by AWS Strands Agents · Bedrock · Athena · CloudWatch · MCP**
 
-## 🌟 Features
-- Query pipeline data in natural language
-- AI-powered analysis using AWS Bedrock
-- Interactive Streamlit UI
-- Real-time pipeline monitoring
-- Automatic Athena data summarization
+[![CI](https://github.com/nikhilsana1004/devops-pipeline-chatbot/actions/workflows/ci.yml/badge.svg)](https://github.com/nikhilsana1004/devops-pipeline-chatbot/actions)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 🏗️ Architecture
-Data Source: AWS Athena  
-Model: Claude 3 Sonnet (Bedrock)  
-Frontend: Streamlit  
-Storage: S3  
+---
 
-## 📋 Prerequisites
-- Python ≥ 3.8  
-- AWS account with Athena, S3, and Bedrock access  
-- AWS CLI configured  
-- Basic CI/CD knowledge  
-- Read the prerequisites text file
+## What's New in v2
 
-## ⚙️ Quick Start
+| Feature | v1 | v2 |
+|---|---|---|
+| AI Call | `bedrock.invoke_model` (single call) | **Strands Agent** (agentic loop) |
+| Tools | Athena only | **Athena + CloudWatch + CodePipeline + S3 + SNS** |
+| Memory | ❌ Stateless | **✅ Conversation memory** across turns |
+| MCP | ❌ | **✅ MCP Server** — connect from Claude Desktop / Kiro / Amazon Q |
+| Suggested prompts | ❌ | **✅** |
+| Tool-call inspector | ❌ | **✅** Expandable per response |
+| Docker | ❌ | **✅** |
+| Tests | ❌ | **✅** pytest + mocked AWS |
+| CI | ❌ | **✅** GitHub Actions (Python 3.10/3.11/3.12) |
 
-# 1. Clone the repository
+The original Athena schema is preserved exactly:
+`account · time · region · pipeline · execution_id · start_time · stage · action · state`
+
+---
+
+## Architecture
+
+```
+User (Streamlit UI)
+        │
+        ▼
+  PipelineAgent  ←  AWS Strands Agents SDK (agentic loop)
+        │
+        ├── query_athena()            SQL on pipeline_executions
+        ├── get_pipeline_summary()    Overall counts & state breakdown
+        ├── get_failed_pipelines()    Recent failures with stage/action
+        ├── get_table_schema()        Column reference for SQL writing
+        ├── get_cloudwatch_metrics()  Build counts, duration trends
+        ├── get_cloudwatch_alarms()   Active alarm states
+        ├── get_pipeline_status()     Real-time CodePipeline stage state
+        ├── list_pipelines()          All pipelines in account
+        ├── get_pipeline_executions() Execution history
+        ├── list_s3_artifacts()       Browse build artifacts (optional)
+        └── send_sns_alert()          Notify team (optional)
+
+  MCP Server (mcp_servers/pipeline_mcp_server.py)
+        └── Same tools exposed via Model Context Protocol
+            Connect from: Claude Desktop · Kiro · Amazon Q CLI · Claude Code
+```
+
+---
+
+## Quick Start
+
+### 1. Clone & install
+
+```bash
 git clone https://github.com/nikhilsana1004/devops-pipeline-chatbot.git
 cd devops-pipeline-chatbot
 
-# 2. Setup environment
 python -m venv venv
-source venv/bin/activate       # On macOS/Linux
-venv\Scripts\activate          # On Windows
+source venv/bin/activate      # macOS/Linux
+# venv\Scripts\activate       # Windows
 
-# 3. Install dependencies
 pip install -r requirements.txt
+```
 
-# 4. Configure AWS
-aws configure
+### 2. Configure
 
-# 5. Setup environment variables
+```bash
 cp .env.example .env
-Edit .env with your AWS configuration:
+# Edit .env with your values
+```
 
-env
-Copy code
+Minimum required:
+
+```env
 AWS_REGION=us-west-2
 ATHENA_DATABASE=your_athena_database
 ATHENA_TABLE=your_athena_table
 ATHENA_OUTPUT_BUCKET=s3://your-bucket/athena-output/
 BEDROCK_MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0
-▶️ Run the App
-bash
-Copy code
+```
+
+### 3. Run
+
+```bash
 streamlit run app.py
-Access the app at: http://localhost:8501
+# Open http://localhost:8501
+```
 
-💬 Example Queries
-“Status of latest pipeline execution?”
+---
 
-“Pipelines failed in last 24 hrs?”
+## MCP Server
 
-“Show all pipelines in us-east-1”
+Expose your pipeline data to any MCP-compatible AI assistant:
 
-“Which pipeline has the most failures?”
+```bash
+python mcp_servers/pipeline_mcp_server.py
+```
 
-🔒 Security Best Practices
-Never commit .env or AWS credentials
+Add to your client config (e.g. `~/.aws/amazonq/mcp.json` for Amazon Q, `~/.kiro/settings/mcp.json` for Kiro):
 
-Use IAM roles where possible
+```json
+{
+  "mcpServers": {
+    "devops-pipeline": {
+      "command": "python",
+      "args": ["mcp_servers/pipeline_mcp_server.py"],
+      "env": {
+        "AWS_REGION": "us-west-2",
+        "ATHENA_DATABASE": "your_database",
+        "ATHENA_TABLE": "your_table",
+        "ATHENA_OUTPUT_BUCKET": "s3://your-bucket/athena-output/"
+      }
+    }
+  }
+}
+```
 
-Apply least-privilege policies
+---
 
-Rotate keys regularly
+## Docker
 
-🐛 Troubleshooting
-Issue	Fix
-No data found	Verify Athena DB/table names & permissions
-Bedrock API errors	Confirm region and model access
-S3 permission denied	Check bucket path and policies
-AWS credentials missing	Run aws configure again
+```bash
+docker build -t devops-pipeline-chatbot .
 
-🤝 Contributing
-bash
-Copy code
-git checkout -b feature/AmazingFeature
-git commit -m "Add AmazingFeature"
-git push origin feature/AmazingFeature
-Follow Python best practices and test locally.
+docker run -p 8501:8501 \
+  -e AWS_REGION=us-west-2 \
+  -e ATHENA_DATABASE=your_database \
+  -e ATHENA_TABLE=your_table \
+  -e ATHENA_OUTPUT_BUCKET=s3://your-bucket/athena-output/ \
+  -v ~/.aws:/root/.aws:ro \
+  devops-pipeline-chatbot
+```
 
+---
 
-📧 Contact
-Author: Nikhil Sana
-GitHub: @nikhilsana1004
-Project Link: devops-pipeline-chatbot
+## Example Queries
 
-🗺️ Roadmap
-Multi-source pipeline support
+| Query | Tools Used |
+|---|---|
+| "What is the status of the latest pipeline execution?" | `query_athena` |
+| "Which pipelines failed in the last 24 hours?" | `get_failed_pipelines` |
+| "Give me a summary of all pipeline activity" | `get_pipeline_summary` |
+| "Show all pipelines running in us-east-1" | `query_athena` |
+| "Which stage causes the most failures?" | `query_athena` |
+| "Show build duration trend for api-pipeline" | `get_cloudwatch_metrics` |
+| "Are there any active alarms?" | `get_cloudwatch_alarms` |
+| "What's the current status of prod-deploy?" | `get_pipeline_status` |
+| "Alert the team that api-pipeline is down" | `send_sns_alert` |
 
-Advanced visualizations & reports
+---
 
-Docker containerization
+## Tests
 
-Authentication & user management
+```bash
+pytest tests/ -v --cov=tools --cov=utils --cov=agents
+```
 
-Integration with other LLMs
+---
 
-⭐ If you find this helpful, give it a star!
+## Project Structure
+
+```
+devops-pipeline-chatbot/
+├── app.py                           Streamlit UI (v2)
+├── agents/
+│   └── pipeline_agent.py            Strands Agent orchestrator
+├── tools/
+│   ├── athena_tools.py              query_athena, get_pipeline_summary, get_failed_pipelines
+│   ├── cloudwatch_tools.py          CloudWatch metrics & alarms
+│   ├── codepipeline_tools.py        Live pipeline status & history
+│   ├── s3_tools.py                  S3 artifact browser
+│   └── sns_tools.py                 SNS alert publisher
+├── mcp_servers/
+│   └── pipeline_mcp_server.py       FastMCP server
+├── utils/
+│   ├── session.py                   Streamlit session helpers
+│   └── formatters.py                Response formatters
+├── tests/
+│   └── test_tools.py                pytest tests (real schema)
+├── .github/workflows/ci.yml         GitHub Actions CI
+├── Dockerfile
+├── requirements.txt
+└── .env.example
+```
+
+---
+
+## IAM Policy (minimum)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "athena:StartQueryExecution",
+      "athena:GetQueryExecution",
+      "athena:GetQueryResults",
+      "s3:GetObject", "s3:PutObject", "s3:ListBucket",
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream",
+      "cloudwatch:GetMetricStatistics",
+      "cloudwatch:DescribeAlarms",
+      "codepipeline:GetPipelineState",
+      "codepipeline:ListPipelines",
+      "codepipeline:ListPipelineExecutions",
+      "glue:GetDatabase", "glue:GetTable"
+    ],
+    "Resource": "*"
+  }]
+}
+```
+
+---
+
+## Roadmap
+
+- [ ] Amazon Bedrock AgentCore serverless deployment
+- [ ] Bedrock Knowledge Base for runbook RAG
+- [ ] Multi-agent: health agent + remediation agent
+- [ ] GitHub Actions / Jenkins MCP server
+- [ ] Auto-remediation via Lambda on failure detection
+- [ ] Voice interface via Bedrock Nova Sonic
+
+---
+
+## Contributing
+
+```bash
+git checkout -b feature/YourFeature
+git commit -m "Add YourFeature"
+git push origin feature/YourFeature
+# Open a Pull Request
+```
+
+**Author:** Nikhil Sana · [@nikhilsana1004](https://github.com/nikhilsana1004)
+
+⭐ Star this repo if it helped you!
